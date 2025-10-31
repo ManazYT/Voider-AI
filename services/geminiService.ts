@@ -1,35 +1,63 @@
 
-import { GoogleGenAI, Content, Modality, GenerateContentResponse, LiveServerMessage, Blob } from '@google/genai';
-import { Source, ChatMessage, GenerationMode, PerformanceMode } from '../types';
+
+import { GoogleGenAI, Content, Modality, GenerateContentResponse, LiveServerMessage, Blob, Type, GenerateVideosResponse } from '@google/genai';
+import { Source, ChatMessage, GenerationMode, PerformanceMode, AttachedFile, AspectRatio } from '../types';
 
 // Per coding guidelines, API key is assumed to be available in process.env.API_KEY
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+let ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
 
+// --- Utilities ---
 const buildGeminiHistory = (messages: ChatMessage[]): Content[] => {
-    const history = messages.slice();
-    if (history.length > 0 && history[0].id === '1' && history[0].sender === 'ai') {
-        history.shift();
-    }
-    return history
-      .filter(msg => msg.type === 'text' || msg.type === 'code') // Only include text/code in history
+    return messages
+      .filter(msg => (msg.type === 'text' || msg.type === 'code') && msg.id !== '1') // Exclude initial message and non-text
       .map(message => ({
         role: message.sender === 'user' ? 'user' : 'model',
         parts: [{ text: message.content }],
     }));
 };
 
+const getCurrentLocation = (): Promise<{ latitude: number; longitude: number } | null> => {
+    return new Promise(resolve => {
+        if (!navigator.geolocation) {
+            resolve(null);
+        }
+        navigator.geolocation.getCurrentPosition(
+            position => resolve({
+                latitude: position.coords.latitude,
+                longitude: position.coords.longitude,
+            }),
+            () => resolve(null),
+            { timeout: 5000 }
+        );
+    });
+};
+
+// --- Core Generation Logic ---
+
 export async function generateContent(
     prompt: string, 
     history: ChatMessage[],
     mode: GenerationMode,
-    performanceMode: PerformanceMode
+    performanceMode: PerformanceMode,
+    attachedFile?: AttachedFile,
+    aspectRatio?: AspectRatio,
 ): Promise<Partial<ChatMessage>> {
     try {
+        if (attachedFile && mode === 'text') {
+            return await analyzeImageWithText(prompt, attachedFile);
+        }
+
         switch (mode) {
-            case 'image':
-                return await generateImage(prompt, performanceMode);
+            case 'imageGen':
+                return await generateNewImage(prompt, performanceMode, aspectRatio);
+            case 'imageEdit':
+                 if (!attachedFile) throw new Error("An image must be attached for editing.");
+                return await editImage(prompt, attachedFile);
             case 'code':
                 return await generateCode(prompt, history, performanceMode);
+            case 'videoGen':
+                // This is handled separately due to its async nature
+                throw new Error("Video generation must be initiated via its specific service function.");
             case 'text':
             default:
                 return await generateText(prompt, history, performanceMode);
@@ -45,17 +73,28 @@ export async function generateContent(
 }
 
 async function generateText(prompt: string, history: ChatMessage[], performanceMode: PerformanceMode): Promise<Partial<ChatMessage>> {
-    const modelName = performanceMode === 'quality' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
-    const contents: Content[] = [
-        ...buildGeminiHistory(history),
-        { role: 'user', parts: [{ text: prompt }] }
-    ];
+    // FIX: Use 'gemini-flash-lite-latest' for speed mode as per guidelines
+    const modelName = performanceMode === 'quality' ? 'gemini-2.5-pro' : 'gemini-flash-lite-latest';
+    const isLocationQuery = /(nearby|near me|directions|how to get to|closest|where is)/i.test(prompt);
+    
+    const tools: any[] = [{ googleSearch: {} }];
+    let toolConfig: any = {};
 
-    const response: GenerateContentResponse = await ai.models.generateContent({
+    if (isLocationQuery) {
+        const location = await getCurrentLocation();
+        if (location) {
+            tools.push({ googleMaps: {} });
+            toolConfig.retrievalConfig = { latLng: location };
+        }
+    }
+    
+    const response = await ai.models.generateContent({
         model: modelName,
-        contents: contents,
+        contents: [...buildGeminiHistory(history), { role: 'user', parts: [{ text: prompt }] }],
         config: {
-            tools: [{ googleSearch: {} }],
+            tools,
+            toolConfig,
+            ...(performanceMode === 'quality' && { thinkingConfig: { thinkingBudget: 32768 } })
         },
     });
 
@@ -63,73 +102,123 @@ async function generateText(prompt: string, history: ChatMessage[], performanceM
     const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
     if (groundingChunks) {
         for (const chunk of groundingChunks) {
-            if (chunk.web && chunk.web.uri && chunk.web.title) {
-                sources.push({ uri: chunk.web.uri, title: chunk.web.title });
+            if (chunk.web && chunk.web.uri) {
+                sources.push({ uri: chunk.web.uri, title: chunk.web.title || chunk.web.uri });
+            }
+            if (chunk.maps && chunk.maps.uri) {
+                sources.push({ uri: chunk.maps.uri, title: chunk.maps.title || 'View on Google Maps' });
             }
         }
     }
     
-    return { 
-        type: 'text',
-        content: response.text || "The void is silent. No response was generated.", 
-        sources 
-    };
+    return { type: 'text', content: response.text, sources };
 }
 
-async function generateImage(prompt: string, performanceMode: PerformanceMode): Promise<Partial<ChatMessage>> {
+async function analyzeImageWithText(prompt: string, image: AttachedFile): Promise<Partial<ChatMessage>> {
+     const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: { parts: [
+            { inlineData: { data: image.data, mimeType: image.type } },
+            { text: prompt }
+        ] },
+    });
+    return { type: 'text', content: response.text };
+}
+
+async function generateNewImage(prompt: string, performanceMode: PerformanceMode, aspectRatio: AspectRatio = '1:1'): Promise<Partial<ChatMessage>> {
     if (performanceMode === 'quality') {
         const response = await ai.models.generateImages({
             model: 'imagen-4.0-generate-001',
-            prompt: prompt,
-            config: {
-              numberOfImages: 1,
-              outputMimeType: 'image/png',
-            },
+            prompt,
+            config: { numberOfImages: 1, outputMimeType: 'image/png', aspectRatio },
         });
         const base64ImageBytes = response.generatedImages?.[0]?.image?.imageBytes;
-        if (base64ImageBytes) {
-             return { type: 'image', content: base64ImageBytes };
-        }
+        if (base64ImageBytes) return { type: 'image', content: base64ImageBytes };
     } else {
-        const response: GenerateContentResponse = await ai.models.generateContent({
+        const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-image',
             contents: { parts: [{ text: prompt }] },
-            config: {
-                responseModalities: [Modality.IMAGE],
-            },
+            config: { responseModalities: [Modality.IMAGE] },
         });
-
-        for (const part of response.candidates?.[0]?.content?.parts ?? []) {
-            if (part.inlineData) {
-                return { type: 'image', content: part.inlineData.data };
-            }
-        }
+        const part = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+        if (part?.inlineData) return { type: 'image', content: part.inlineData.data };
     }
-    
-    return { type: 'error', content: 'A vision was attempted, but the void returned nothing. The prompt may have been too abstract or restrictive. Please try rephrasing your description.' };
+    return { type: 'error', content: 'A vision was attempted, but the void returned nothing.' };
+}
+
+async function editImage(prompt: string, image: AttachedFile): Promise<Partial<ChatMessage>> {
+    const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: { parts: [
+            { inlineData: { data: image.data, mimeType: image.type } },
+            { text: prompt }
+        ]},
+        config: { responseModalities: [Modality.IMAGE] },
+    });
+    const part = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+    if (part?.inlineData) return { type: 'image', content: part.inlineData.data };
+    return { type: 'error', content: 'The vision could not be altered as requested.' };
 }
 
 async function generateCode(prompt: string, history: ChatMessage[], performanceMode: PerformanceMode): Promise<Partial<ChatMessage>> {
-    const modelName = performanceMode === 'quality' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
-    const contents: Content[] = [
-        ...buildGeminiHistory(history),
-        { role: 'user', parts: [{ text: prompt }] }
-    ];
-
-    const response: GenerateContentResponse = await ai.models.generateContent({
+    // FIX: Use 'gemini-flash-lite-latest' for speed mode as per guidelines
+    const modelName = performanceMode === 'quality' ? 'gemini-2.5-pro' : 'gemini-flash-lite-latest';
+    const response = await ai.models.generateContent({
         model: modelName,
-        contents: contents,
+        contents: [...buildGeminiHistory(history), { role: 'user', parts: [{ text: prompt }] }],
         config: {
-            systemInstruction: "You are a coding assistant. Your primary task is to provide clean, executable code based on the user's request. Do not add any explanatory text, comments, or markdown formatting like ```javascript. Return only the raw code block itself.",
+            systemInstruction: "You are a coding assistant. Return only the raw code block itself.",
+            ...(performanceMode === 'quality' && { thinkingConfig: { thinkingBudget: 32768 } })
         }
     });
-
     const cleanedCode = response.text.replace(/^```(?:\w+\n)?/, '').replace(/```$/, '').trim();
+    return { type: 'code', content: cleanedCode || "The logic could not be materialized." };
+}
 
-    return { 
-        type: 'code',
-        content: cleanedCode || "The logic could not be materialized. The model returned no code. Please try a more specific or different request."
-    };
+// --- Video Service ---
+// FIX: Replace VideosOperation with `any` as it is not exported from @google/genai
+export async function generateVideo(prompt: string, aspectRatio: AspectRatio, image?: AttachedFile): Promise<any> {
+    // Re-create instance to ensure latest API key is used
+    ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+    try {
+        return await ai.models.generateVideos({
+            model: 'veo-3.1-fast-generate-preview',
+            prompt,
+            ...(image && { image: { imageBytes: image.data, mimeType: image.type } }),
+            config: {
+                numberOfVideos: 1,
+                resolution: '720p',
+                aspectRatio: aspectRatio === '16:9' || aspectRatio === '9:16' ? aspectRatio : '16:9',
+            }
+        });
+    } catch (e) {
+        if (e.message.includes("Requested entity was not found")) {
+            // This signals a potential API key issue. The UI should handle this.
+            throw new Error("API_KEY_INVALID");
+        }
+        throw e;
+    }
+}
+
+// FIX: Replace VideosOperation with `any` as it is not exported from @google/genai
+export async function pollVideoStatus(operation: any): Promise<any> {
+    // Re-create instance to ensure latest API key is used
+    ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+    return await ai.operations.getVideosOperation({ operation });
+}
+
+
+// --- TTS Service ---
+export async function generateSpeech(text: string): Promise<string> {
+    const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text }] }],
+        config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
+        },
+    });
+    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data ?? '';
 }
 
 
@@ -144,7 +233,8 @@ function encode(bytes: Uint8Array) {
     return btoa(binary);
 }
 
-function decode(base64: string) {
+// This is reused for TTS audio output
+export function decode(base64: string) {
     const binaryString = atob(base64);
     const len = binaryString.length;
     const bytes = new Uint8Array(len);
@@ -154,7 +244,8 @@ function decode(base64: string) {
     return bytes;
 }
 
-async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: number, numChannels: number): Promise<AudioBuffer> {
+// This is reused for TTS audio output
+export async function decodeAudioData(data: Uint8Array, ctx: AudioContext, sampleRate: number, numChannels: number): Promise<AudioBuffer> {
     const dataInt16 = new Int16Array(data.buffer);
     const frameCount = dataInt16.length / numChannels;
     const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
@@ -205,7 +296,7 @@ class LiveSessionManager {
                 },
                 onmessage: async (message: LiveServerMessage) => {
                     const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData.data;
-                    if (base64Audio) {
+                    if (base64Audio && this.outputAudioContext) {
                         this.nextStartTime = Math.max(this.nextStartTime, this.outputAudioContext!.currentTime);
                         const audioBuffer = await decodeAudioData(decode(base64Audio), this.outputAudioContext!, 24000, 1);
                         const sourceNode = this.outputAudioContext!.createBufferSource();
@@ -257,12 +348,14 @@ class LiveSessionManager {
         this.source = null;
         this.scriptProcessor = null;
 
-        this.inputAudioContext?.close();
-        this.outputAudioContext?.close();
+        this.inputAudioContext?.close().catch(console.error);
+        this.outputAudioContext?.close().catch(console.error);
         this.inputAudioContext = null;
         this.outputAudioContext = null;
 
-        this.sources.forEach(s => s.stop());
+        this.sources.forEach(s => {
+            try { s.stop(); } catch(e) {}
+        });
         this.sources.clear();
     }
 }
