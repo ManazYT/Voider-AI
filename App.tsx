@@ -1,11 +1,12 @@
 
 
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ChatMessage, GenerationMode, ThemeName, PerformanceMode, VCStatus, AttachedFile, AspectRatio } from './types';
-import { THEMES, INITIAL_MESSAGES } from './constants';
-import { generateContent, liveSessionManager, generateVideo, pollVideoStatus, generateSpeech, decode, decodeAudioData } from './services/geminiService';
-import Message from './components/Message';
-import { TextIcon, ImageIcon, CodeIcon, SendIcon, VCIcon, DisconnectIcon, VideoGenIcon, UploadIcon } from './components/Icons';
+import { ChatMessage, GenerationMode, ThemeName, PerformanceMode, VCStatus, AttachedFile, AspectRatio } from './types.ts';
+import { THEMES, INITIAL_MESSAGES } from './constants.ts';
+import { generateContent, liveSessionManager, generateVideo, pollVideoStatus, generateSpeech, decode, decodeAudioData } from './services/geminiService.ts';
+import Message from './components/Message.tsx';
+import { TextIcon, ImageIcon, CodeIcon, SendIcon, VCIcon, DisconnectIcon, VideoGenIcon, UploadIcon } from './components/Icons.tsx';
 // FIX: Remove VideosOperation as it is not exported from @google/genai
 import { LiveServerMessage } from '@google/genai';
 

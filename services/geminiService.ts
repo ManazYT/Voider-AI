@@ -1,7 +1,8 @@
 
 
+
 import { GoogleGenAI, Content, Modality, GenerateContentResponse, LiveServerMessage, Blob, Type, GenerateVideosResponse } from '@google/genai';
-import { Source, ChatMessage, GenerationMode, PerformanceMode, AttachedFile, AspectRatio } from '../types';
+import { Source, ChatMessage, GenerationMode, PerformanceMode, AttachedFile, AspectRatio } from '../types.ts';
 
 // Per coding guidelines, API key is assumed to be available in process.env.API_KEY
 let ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });

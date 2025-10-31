@@ -1,8 +1,9 @@
 
+
 import React, { useState } from 'react';
-import { ChatMessage } from '../types';
-import { DownloadIcon, CopyIcon, PlayIcon, SpeakerIcon } from './Icons';
-import CodeSandboxModal from './CodeSandboxModal';
+import { ChatMessage } from '../types.ts';
+import { DownloadIcon, CopyIcon, PlayIcon, SpeakerIcon } from './Icons.tsx';
+import CodeSandboxModal from './CodeSandboxModal.tsx';
 
 const Message: React.FC<{ message: ChatMessage, onTTS: (text: string) => void }> = ({ message, onTTS }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);

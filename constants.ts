@@ -1,4 +1,5 @@
-import { Theme, ChatMessage } from './types';
+
+import { Theme, ChatMessage } from './types.ts';
 
 export const THEMES: Theme[] = [
   {
